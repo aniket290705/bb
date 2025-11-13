@@ -1,20 +1,28 @@
 import streamlit as st
-from pymongo import MongoClient
+import pandas as pd
 import hashlib
 import uuid
+import os
 
 # ---------------------------
-# DATABASE CONNECTION (Atlas Cluster)
+# FILE PATHS
 # ---------------------------
-@st.cache_resource
-def get_db():
-    client = MongoClient(st.secrets["mongo"]["uri"])
-    db = client[st.secrets["mongo"]["db"]]
-    return db
+USERS_FILE = "users.csv"
+PRODUCTS_FILE = "products.csv"
 
-db = get_db()
-users = db["users"]
-products = db["products"]
+# ---------------------------
+# LOAD OR INIT CSV FILES
+# ---------------------------
+def load_data(file, columns):
+    if not os.path.exists(file):
+        df = pd.DataFrame(columns=columns)
+        df.to_csv(file, index=False)
+    else:
+        df = pd.read_csv(file)
+    return df
+
+users_df = load_data(USERS_FILE, ["name", "username", "password", "salt", "role"])
+products_df = load_data(PRODUCTS_FILE, ["title", "price", "stock", "description"])
 
 # ---------------------------
 # PASSWORD HASHING
@@ -22,50 +30,59 @@ products = db["products"]
 def hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode()).hexdigest()
 
+# ---------------------------
+# SAVE DATA
+# ---------------------------
+def save_users():
+    users_df.to_csv(USERS_FILE, index=False)
+
+def save_products():
+    products_df.to_csv(PRODUCTS_FILE, index=False)
+
+# ---------------------------
+# CREATE USER
+# ---------------------------
 def create_user(name: str, username: str, password: str, role: str) -> str:
-    if not username or not password:
-        return "Username and password are required."
-    if users.find_one({"username": username}):
+    global users_df
+    if username in users_df["username"].values:
         return "Username already exists."
     salt = uuid.uuid4().hex
     hashed = hash_password(password, salt)
-    users.insert_one({
+    new_user = pd.DataFrame([{
         "name": name,
         "username": username,
         "password": hashed,
         "salt": salt,
         "role": role
-    })
+    }])
+    users_df = pd.concat([users_df, new_user], ignore_index=True)
+    save_users()
     return "User created successfully."
 
 # ---------------------------
-# AUTO-CREATE DEFAULT ADMIN
+# ENSURE DEFAULT ADMIN
 # ---------------------------
-def ensure_default_admin():
-    default_user = users.find_one({"username": "sujal_2930"})
-    if not default_user:
-        salt = uuid.uuid4().hex
-        hashed = hash_password("sujalani1@@gym", salt)
-        users.insert_one({
-            "name": "Sujal",
-            "username": "sujal_2930",
-            "password": hashed,
-            "salt": salt,
-            "role": "admin"
-        })
-        print("✅ Default admin user 'sujal_2930' created.")
-    else:
-        print("ℹ️ Default admin already exists.")
-
-ensure_default_admin()
+if "sujal_2930" not in users_df["username"].values:
+    salt = uuid.uuid4().hex
+    hashed = hash_password("sujalani1@@gym", salt)
+    default_admin = pd.DataFrame([{
+        "name": "Sujal",
+        "username": "sujal_2930",
+        "password": hashed,
+        "salt": salt,
+        "role": "admin"
+    }])
+    users_df = pd.concat([users_df, default_admin], ignore_index=True)
+    save_users()
 
 # ---------------------------
 # LOGIN VALIDATION
 # ---------------------------
 def login_user(username: str, password: str):
-    user = users.find_one({"username": username})
-    if not user:
+    user = users_df[users_df["username"] == username]
+    if user.empty:
         return None
+    user = user.iloc[0]
     if hash_password(password, user["salt"]) == user["password"]:
         return {
             "name": user["name"],
@@ -75,7 +92,7 @@ def login_user(username: str, password: str):
     return None
 
 # ---------------------------
-# STREAMLIT PAGE SETUP
+# STREAMLIT PAGE
 # ---------------------------
 st.set_page_config(page_title="Gym Accessories Store", layout="centered")
 st.title("🏋️ Gym Accessories Online Store")
@@ -115,7 +132,7 @@ elif menu == "Admin":
     st.subheader("🧑‍💼 Admin Dashboard")
 
     if not st.session_state.user or st.session_state.user["role"] != "admin":
-        st.warning("Please log in as admin first on the Login page.")
+        st.warning("Please log in as admin first.")
     else:
         st.success(f"Logged in as Admin: {st.session_state.user['name']}")
 
@@ -127,26 +144,15 @@ elif menu == "Admin":
             role = st.selectbox("Role", ["user", "admin"])
             submit = st.form_submit_button("Create User")
             if submit:
-                username = username.strip()
-                if not username:
-                    st.error("Username cannot be empty.")
-                elif not password:
-                    st.error("Password cannot be empty.")
+                result = create_user(name.strip(), username.strip(), password, role)
+                if "success" in result.lower():
+                    st.success(result)
                 else:
-                    result = create_user(name.strip(), username, password, role)
-                    if "successfully" in result.lower():
-                        st.success(result)
-                    else:
-                        st.error(result)
+                    st.error(result)
 
         st.write("---")
-        st.write("### 🧾 Existing Users (no sensitive data shown):")
-        all_users = list(users.find({}, {"password": 0, "salt": 0}))
-        if not all_users:
-            st.info("No users found.")
-        else:
-            for u in all_users:
-                st.write(f"**{u.get('name','-')}** ({u.get('role','-')}) — `{u.get('username','-')}`")
+        st.write("### 🧾 Existing Users")
+        st.dataframe(users_df[["name", "username", "role"]])
 
         st.write("---")
         st.write("### 🏋️ Add Product")
@@ -157,16 +163,16 @@ elif menu == "Admin":
             desc = st.text_area("Description")
             submitted = st.form_submit_button("Add Product")
             if submitted:
-                if not title.strip():
-                    st.error("Product name cannot be empty.")
-                else:
-                    products.insert_one({
-                        "title": title.strip(),
-                        "price": float(price),
-                        "stock": int(stock),
-                        "description": desc.strip()
-                    })
-                    st.success("Product added successfully!")
+                new_product = pd.DataFrame([{
+                    "title": title.strip(),
+                    "price": float(price),
+                    "stock": int(stock),
+                    "description": desc.strip()
+                }])
+                global products_df
+                products_df = pd.concat([products_df, new_product], ignore_index=True)
+                save_products()
+                st.success("Product added successfully!")
 
 # ---------------------------
 # USER PAGE
@@ -175,20 +181,18 @@ elif menu == "User":
     st.subheader("🛒 User Shopping Page")
 
     if not st.session_state.user or st.session_state.user["role"] != "user":
-        st.warning("Please log in as user first on the Login page.")
+        st.warning("Please log in as user first.")
     else:
         st.success(f"Welcome, {st.session_state.user['name']}")
-
         st.write("### 💪 Available Gym Products")
-        all_products = list(products.find({}, {"description": 1, "title": 1, "price": 1, "stock": 1}))
-        if not all_products:
+        if products_df.empty:
             st.info("No products yet. Admin must add products.")
         else:
-            for p in all_products:
+            for _, p in products_df.iterrows():
                 st.write(f"**{p['title']}** — ₹{p['price']}")
-                if p.get("description"):
+                if p["description"]:
                     st.caption(p["description"])
-                st.write(f"Stock: {p.get('stock', 0)}")
+                st.write(f"Stock: {p['stock']}")
                 st.write("---")
 
 # ---------------------------
@@ -199,10 +203,10 @@ elif menu == "About":
     st.markdown("""
     **Project:** Gym Accessories Online Store  
     **Features:**
-    - Admin and User login system  
-    - MongoDB Atlas (Cluster) connection via Streamlit secrets  
+    - Admin/User login with hashed passwords  
+    - CSV-based storage using Pandas  
     - Auto-creates default admin (`sujal_2930` / `sujalani1@@gym`)  
-    - Admin can create users and add products  
+    - Admin can add users & products  
     - Users can view available gym products  
     """)
-    st.info("Future updates: Add cart, checkout, and analytics dashboard.")
+    st.info("Future: Add cart, checkout, analytics dashboard.")
