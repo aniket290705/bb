@@ -169,7 +169,7 @@ elif menu == "Admin":
                     "stock": int(stock),
                     "description": desc.strip()
                 }])
-                global products_df
+                
                 products_df = pd.concat([products_df, new_product], ignore_index=True)
                 save_products()
                 st.success("Product added successfully!")
